@@ -46,7 +46,7 @@ type EntityFilter func(entityID string) bool
 // WithEntityFilter sets a predicate that controls which entities are
 // traced. When the filter returns false for an entityID, all [Track],
 // [RecordEntity], [StepEntity], and [EnterEntity] calls for that entity
-// become no-ops — avoiding the lock entirely.
+// become no-ops.
 //
 //	ctx := stepmark.New(ctx, stepmark.WithEntityFilter(func(id string) bool {
 //	    return id == targetOrderID

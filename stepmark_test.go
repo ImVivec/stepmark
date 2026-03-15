@@ -528,6 +528,99 @@ func TestScopeDisabled(t *testing.T) {
 	products.RecordEvent("p_1", "s", "a", nil)
 }
 
+func TestScopeStep(t *testing.T) {
+	ctx := New(context.Background())
+	products := NewScope(ctx, "product")
+	products.Track("p_1", nil)
+	products.Step("p_1", "scored", map[string]any{"score": 0.95})
+
+	trace := Collect(ctx)
+	et := trace.Entities["p_1"]
+	if len(et.Events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(et.Events))
+	}
+	if et.Events[0].Stage != "TestScopeStep" {
+		t.Errorf("expected stage 'TestScopeStep', got '%s'", et.Events[0].Stage)
+	}
+	if et.Events[0].Action != "scored" {
+		t.Errorf("expected action 'scored', got '%s'", et.Events[0].Action)
+	}
+}
+
+func TestScopeStepDisabled(t *testing.T) {
+	products := NewScope(context.Background(), "product")
+	products.Step("p_1", "noop", nil)
+}
+
+func TestScopeStepFiltered(t *testing.T) {
+	ctx := New(context.Background(), WithEntityFilter(func(id string) bool {
+		return id == "p_1"
+	}))
+	products := NewScope(ctx, "product")
+	products.Step("p_1", "ok", nil)
+	products.Step("p_2", "blocked", nil)
+
+	trace := Collect(ctx)
+	if len(trace.Entities) != 1 {
+		t.Fatalf("filter should apply to Scope.Step; got %d entities", len(trace.Entities))
+	}
+}
+
+func TestScopeEnter(t *testing.T) {
+	fixed := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	callNum := 0
+	ctx := New(context.Background(), WithClock(func() time.Time {
+		callNum++
+		return fixed.Add(time.Duration(callNum) * 50 * time.Millisecond)
+	}))
+
+	products := NewScope(ctx, "product")
+	products.Track("p_1", nil)
+	exit := products.Enter("p_1", nil)
+	exit()
+
+	trace := Collect(ctx)
+	et := trace.Entities["p_1"]
+	if len(et.Events) != 2 {
+		t.Fatalf("expected 2 events (enter+exit), got %d", len(et.Events))
+	}
+	if et.Events[0].Stage != "TestScopeEnter" {
+		t.Errorf("expected stage 'TestScopeEnter', got '%s'", et.Events[0].Stage)
+	}
+	if et.Events[0].Action != "entered" {
+		t.Error("first event should be 'entered'")
+	}
+	if et.Events[1].Action != "exited" {
+		t.Error("second event should be 'exited'")
+	}
+	dur, ok := et.Events[1].Meta["duration_ms"].(float64)
+	if !ok || dur <= 0 {
+		t.Errorf("exit event should have positive duration_ms, got %v", et.Events[1].Meta["duration_ms"])
+	}
+}
+
+func TestScopeEnterDisabled(t *testing.T) {
+	products := NewScope(context.Background(), "product")
+	exit := products.Enter("p_1", nil)
+	exit()
+}
+
+func TestScopeEnterFiltered(t *testing.T) {
+	ctx := New(context.Background(), WithEntityFilter(func(id string) bool {
+		return id == "p_1"
+	}))
+	products := NewScope(ctx, "product")
+	exitWanted := products.Enter("p_1", nil)
+	exitWanted()
+	exitBlocked := products.Enter("p_2", nil)
+	exitBlocked()
+
+	trace := Collect(ctx)
+	if len(trace.Entities) != 1 {
+		t.Fatalf("filter should apply to Scope.Enter; got %d entities", len(trace.Entities))
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Trace metadata
 // ---------------------------------------------------------------------------

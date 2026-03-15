@@ -6,7 +6,7 @@
 [![CI](https://github.com/ImVivec/stepmark/actions/workflows/ci.yml/badge.svg)](https://github.com/ImVivec/stepmark/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Standard logs are noisy. APM tools track latency, not logic. Stepmark traces the **decision-making journey** of specific entities — orders, users, search results — through your codebase. On demand, with zero overhead when off.
+Standard logs are noisy. APM tools track latency, not logic. Stepmark traces the **decision-making journey** of specific entities — orders, users, search results — through your codebase. On demand.
 
 ---
 
@@ -18,7 +18,7 @@ You have a complex backend where an order flows through validation, fraud detect
 - **APM?** It tells you the request took 200ms. It doesn't tell you *why* the order was rejected.
 - **Debugger?** Good luck attaching one to production.
 
-Stepmark gives you a structured audit trail of every decision point, but **only when you ask for it**. In normal production traffic, each call costs under 2 nanoseconds with zero memory allocations.
+Stepmark gives you a structured audit trail of every decision point, but **only when you ask for it**. When tracing is not enabled, every call is a no-op.
 
 ---
 
@@ -85,42 +85,6 @@ func main() {
 
 ---
 
-## Zero Overhead Guarantee
-
-When tracing is not enabled (the normal case in production), every Stepmark call compiles down to a nil-check on `context.Value()`. No allocations. No locks. No map lookups.
-
-```
-goos: darwin
-goarch: arm64
-cpu: Apple M4
-
-BenchmarkEnabled_Disabled             692M      1.72 ns/op    0 B/op   0 allocs/op
-BenchmarkRecord_Disabled              670M      1.78 ns/op    0 B/op   0 allocs/op
-BenchmarkRecordEntity_Disabled        660M      1.86 ns/op    0 B/op   0 allocs/op
-BenchmarkTrack_Disabled               680M      1.76 ns/op    0 B/op   0 allocs/op
-```
-
-Put `stepmark.Record(...)` calls throughout your hot paths. When nobody is tracing, each call costs **< 2 nanoseconds**. Auto-instrumentation (`Step`, `Enter`) and entity filtering maintain the same guarantee:
-
-```
-BenchmarkStep_Disabled                611M      1.96 ns/op    0 B/op   0 allocs/op
-BenchmarkStepEntity_Disabled          674M      1.78 ns/op    0 B/op   0 allocs/op
-BenchmarkEnter_Disabled               607M      1.98 ns/op    0 B/op   0 allocs/op
-BenchmarkEnterEntity_Disabled         375M      2.69 ns/op    0 B/op   0 allocs/op
-BenchmarkRecordEntity_Filtered        279M      4.23 ns/op    0 B/op   0 allocs/op
-```
-
-When tracing *is* enabled (the rare debug case):
-
-```
-BenchmarkEnabled_Enabled              407M      2.96 ns/op    0 B/op   0 allocs/op
-BenchmarkRecord_Enabled               5.7M      234  ns/op    682 B/op 2 allocs/op
-BenchmarkRecordEntity_Enabled         5.2M      242  ns/op    724 B/op 3 allocs/op
-BenchmarkStep_Enabled                 3.6M      327  ns/op    596 B/op 2 allocs/op
-```
-
-`Step`/`Enter` cost ~100ns more than `Record` when enabled due to `runtime.Caller` — the price of auto-detecting the function name. This only runs on the tracing-enabled path.
-
 ---
 
 ## API
@@ -130,7 +94,7 @@ BenchmarkStep_Enabled                 3.6M      327  ns/op    596 B/op 2 allocs/
 | Function | Purpose |
 |---|---|
 | `New(ctx, ...Option) context.Context` | Start tracing — injects a tracer into the context |
-| `Enabled(ctx) bool` | Check if tracing is active (< 2ns fast path) |
+| `Enabled(ctx) bool` | Check if tracing is active |
 | `Track(ctx, entityID, meta, ...TrackOption)` | Register an entity with optional metadata and kind |
 | `RecordEntity(ctx, entityID, stage, action, meta)` | Record an event for a specific entity |
 | `Record(ctx, stage, action, meta)` | Record an unscoped event (not tied to an entity) |
@@ -152,6 +116,8 @@ BenchmarkStep_Enabled                 3.6M      327  ns/op    596 B/op 2 allocs/
 | `NewScope(ctx, kind) Scope` | Create a scoped recorder that auto-sets entity kind |
 | `Scope.Track(entityID, meta)` | Track an entity within the scope |
 | `Scope.RecordEvent(entityID, stage, action, meta)` | Record an event within the scope |
+| `Scope.Step(entityID, action, meta)` | Auto-instrumented entity event (caller's name as stage) |
+| `Scope.Enter(entityID, meta) func()` | Auto-instrumented entity entry/exit with duration |
 
 **Options:**
 
@@ -163,7 +129,7 @@ BenchmarkStep_Enabled                 3.6M      327  ns/op    596 B/op 2 allocs/
 | `WithEntityFilter(fn)` | Only trace entities matching a predicate |
 | `WithKind(kind)` | Classify an entity by type (used with `Track`) |
 
-**Every function is a no-op when tracing is disabled.** You never need to guard with `if stepmark.Enabled(ctx)` for correctness — only as an optional optimization to avoid allocating a `map[string]any` literal on the hot path.
+**Every function is a no-op when tracing is disabled.** You never need to guard with `if stepmark.Enabled(ctx)` for correctness.
 
 ---
 
@@ -379,13 +345,11 @@ func ProcessRequest(ctx context.Context) {
 | You want enter/exit with duration | `Enter` / `EnterEntity` |
 | You're tracking many entities of the same kind | `Scope` + `RecordEvent` |
 
-**Performance note:** `Step` and `Enter` cost ~100ns more than `Record` when tracing is enabled (due to `runtime.Caller`). When disabled, they are identical: **< 2ns, 0 allocs**.
-
 ---
 
 ## Conditional Entity Recording
 
-When you only care about specific entities — a particular order, the top-10 search results, a flagged user — use `WithEntityFilter` to skip the rest. Filtered entities avoid the lock entirely, staying close to disabled-path performance (~4ns):
+When you only care about specific entities — a particular order, the top-10 search results, a flagged user — use `WithEntityFilter` to skip the rest:
 
 ```go
 ctx := stepmark.New(ctx,
@@ -654,17 +618,7 @@ type Trace struct {
 
 **Q: Do I need to call `Enabled()` before `Record()`?**
 
-No. Every function is a no-op when tracing is disabled. The only reason to check `Enabled()` is to avoid allocating a `map[string]any` on the hot path:
-
-```go
-// Always correct, always safe:
-stepmark.Record(ctx, "stage", "action", map[string]any{"key": value})
-
-// Slightly faster in the disabled case (avoids map allocation):
-if stepmark.Enabled(ctx) {
-    stepmark.Record(ctx, "stage", "action", map[string]any{"key": value})
-}
-```
+No. Every function is a no-op when tracing is disabled. Just call `Record` directly.
 
 **Q: Is it safe to use from multiple goroutines?**
 
@@ -674,10 +628,6 @@ Yes. The tracer uses a mutex internally. All functions are safe for concurrent u
 
 Each call returns an independent deep copy. Calling `Collect()` does not consume or reset the tracer. Events recorded between calls appear in subsequent snapshots.
 
-**Q: Will it slow down my production traffic?**
-
-No. When tracing is not enabled, every call is a single `context.Value()` lookup that returns nil, followed by an early return. Benchmarked at 1.7–1.9 ns with zero allocations. This is comparable to a single pointer dereference.
-
 **Q: How do I limit trace size?**
 
 Use `WithMaxEvents(n)` when creating the tracer. Once the cap is reached, new events are silently dropped. Track metadata (`Track()` calls) is not counted toward the limit.
@@ -686,10 +636,6 @@ Use `WithMaxEvents(n)` when creating the tracer. Once the cap is reached, new ev
 
 Use `Record` when you want a specific, human-readable stage name like `"validation"` or `"fraud_check"`. Use `Step` when the function name itself is the stage — it saves you from typing the same string you'd copy from the function declaration. Use `Enter`/`EnterEntity` when you want automatic enter/exit boundary events with duration.
 
-**Q: Does `Step`/`Enter` affect performance when tracing is disabled?**
-
-No. The nil-check returns before `runtime.Caller` is ever called. Disabled-path cost is identical to `Record`: < 2ns, 0 allocs. The `runtime.Caller` overhead (~100ns) only applies when tracing is active.
-
 ---
 
 ## Design Decisions
@@ -697,12 +643,35 @@ No. The nil-check returns before `runtime.Caller` is ever called. Disabled-path 
 | Decision | Rationale |
 |---|---|
 | Context-only, no globals | Traces are scoped to a request. No shared mutable state, no cleanup needed. |
-| `sync.Mutex` over `sync.RWMutex` | `Collect()` is called once per request; `Record()` is called many times. `RWMutex` adds atomic reader-count overhead on every `Record()` for a read-side benefit that's exercised once. |
-| Shallow `cloneMap` | Deep copy requires reflection. Shallow copy isolates the map structure (callers can't add/remove keys) while keeping the common case fast. |
-| `runtime.Caller` only when enabled | Auto-instrumentation (`Step`/`Enter`) pays the ~100ns `runtime.Caller` cost only on the tracing-enabled path. When disabled, the nil-check returns before touching the runtime — same < 2ns as `Record`. |
-| Entity filter before lock | `WithEntityFilter` is checked before acquiring the mutex, so filtered entities never contend. The filter function is set once at creation and never mutated, making the unsynchronized read safe. |
+| `sync.Mutex` over `sync.RWMutex` | `Collect()` is called once per request; `Record()` is called many times. A write-biased lock is the right fit. |
+| Shallow `cloneMap` | Deep copy requires reflection. Shallow copy isolates the map structure (callers can't add/remove keys) which is sufficient for the common case. |
+| `runtime.Caller` gated by nil-check | `Step`/`Enter` only call `runtime.Caller` when tracing is enabled. When disabled, the nil-check exits before touching the runtime. |
+| Entity filter before lock | `WithEntityFilter` is checked before acquiring the mutex. The filter is set once at creation and never mutated, making the unsynchronized read safe. |
 | No `slog`/`log` integration | Stepmark collects structured data. What you do with it — log it, return it in an API, send it to Kafka — is your choice. Compose `Collect()` with whatever output you need. |
 | Separate `stepmarkhttp` package | Keeps the core library at zero dependencies. You only import the middleware if you need it. |
+
+---
+
+## Benchmarks
+
+When tracing is disabled, every call is a nil-check on `context.Value()` — no allocations, no locks.
+
+```
+goos: darwin / goarch: arm64 / cpu: Apple M4
+
+Disabled path (normal production traffic):
+  BenchmarkRecord_Disabled              1.78 ns/op    0 B/op   0 allocs/op
+  BenchmarkRecordEntity_Disabled        1.86 ns/op    0 B/op   0 allocs/op
+  BenchmarkStep_Disabled                1.96 ns/op    0 B/op   0 allocs/op
+  BenchmarkEnter_Disabled               1.98 ns/op    0 B/op   0 allocs/op
+
+Enabled path (active tracing):
+  BenchmarkRecord_Enabled               234  ns/op    682 B/op 2 allocs/op
+  BenchmarkRecordEntity_Enabled         242  ns/op    724 B/op 3 allocs/op
+  BenchmarkStep_Enabled                 327  ns/op    596 B/op 2 allocs/op
+```
+
+Run `make bench` to reproduce.
 
 ---
 

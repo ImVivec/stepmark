@@ -6,22 +6,15 @@ import (
 	"strings"
 )
 
-// noop is returned by Enter/EnterEntity when tracing is disabled
-// so that `defer stepmark.Enter(ctx, nil)()` never allocates.
 var noop = func() {}
 
 // Step records an unscoped event, automatically using the calling
-// function's name as the stage. This eliminates the need to manually
-// pass stage strings.
+// function's name as the stage.
 //
 //	func ProcessOrder(ctx context.Context) {
 //	    stepmark.Step(ctx, "started", nil)       // stage = "ProcessOrder"
 //	    stepmark.Step(ctx, "validated", nil)      // stage = "ProcessOrder"
 //	}
-//
-// When tracing is disabled, this is a no-op (~2ns, 0 allocs).
-// When enabled, [runtime.Caller] resolves the function name (~200ns
-// overhead on top of the normal recording cost).
 func Step(ctx context.Context, action string, meta map[string]any) {
 	t, _ := ctx.Value(contextKey{}).(*tracer)
 	if t == nil {
@@ -55,9 +48,6 @@ func StepEntity(ctx context.Context, entityID, action string, meta map[string]an
 //	    defer stepmark.Enter(ctx, nil)()
 //	    // stage = "ValidateOrder", action = "entered" ... then "exited"
 //	}
-//
-// When tracing is disabled, returns a package-level no-op function
-// (zero allocations). The defer itself costs ~50ns regardless.
 func Enter(ctx context.Context, meta map[string]any) func() {
 	t, _ := ctx.Value(contextKey{}).(*tracer)
 	if t == nil {
@@ -124,7 +114,8 @@ func cleanFuncName(full string) string {
 	if i := strings.IndexByte(full, '.'); i >= 0 {
 		full = full[i+1:]
 	}
-	full = strings.TrimPrefix(full, "(*")
-	full = strings.Replace(full, ").", ".", 1)
+	if after, ok := strings.CutPrefix(full, "(*"); ok {
+		return strings.Replace(after, ").", ".", 1)
+	}
 	return full
 }

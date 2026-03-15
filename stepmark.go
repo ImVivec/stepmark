@@ -1,9 +1,9 @@
 // Package stepmark is an on-demand business logic tracer for Go.
 //
 // Stepmark traces the decision-making journey of specific entities —
-// orders, users, search results — through complex codebases. It is
-// designed for production use: when tracing is not enabled, every call
-// is a sub-2ns no-op with zero allocations.
+// orders, users, search results — through complex codebases. All
+// tracing functions are safe for production use and behave as no-ops
+// when tracing is not enabled on the context.
 //
 // # Quick Start
 //
@@ -29,8 +29,6 @@ func New(ctx context.Context, opts ...Option) context.Context {
 }
 
 // Enabled reports whether ctx carries an active tracer.
-// This compiles down to a single context-chain walk — no type
-// assertion, no allocation, no lock.
 func Enabled(ctx context.Context) bool {
 	return ctx.Value(contextKey{}) != nil
 }
