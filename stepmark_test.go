@@ -416,6 +416,184 @@ func TestWithClock(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Kind / Scope
+// ---------------------------------------------------------------------------
+
+func TestTrackWithKind(t *testing.T) {
+	ctx := New(context.Background())
+	Track(ctx, "p_1", map[string]any{"name": "Widget"}, WithKind("product"))
+	Track(ctx, "o_1", map[string]any{"total": 99.99}, WithKind("order"))
+	RecordEntity(ctx, "p_1", "ranking", "scored", nil)
+	RecordEntity(ctx, "o_1", "validation", "passed", nil)
+
+	trace := Collect(ctx)
+	if trace.Entities["p_1"].Kind != "product" {
+		t.Errorf("expected kind 'product', got '%s'", trace.Entities["p_1"].Kind)
+	}
+	if trace.Entities["o_1"].Kind != "order" {
+		t.Errorf("expected kind 'order', got '%s'", trace.Entities["o_1"].Kind)
+	}
+}
+
+func TestTrackWithoutKind(t *testing.T) {
+	ctx := New(context.Background())
+	Track(ctx, "e1", nil)
+
+	trace := Collect(ctx)
+	if trace.Entities["e1"].Kind != "" {
+		t.Error("kind should be empty when WithKind is not used")
+	}
+}
+
+func TestTrackKindOnRetrack(t *testing.T) {
+	ctx := New(context.Background())
+	Track(ctx, "e1", nil)
+	Track(ctx, "e1", nil, WithKind("order"))
+
+	trace := Collect(ctx)
+	if trace.Entities["e1"].Kind != "order" {
+		t.Error("kind should be settable on re-track")
+	}
+}
+
+func TestKindJSON(t *testing.T) {
+	et := EntityTrace{EntityID: "p_1", Kind: "product", Events: []Event{}}
+	data, _ := json.Marshal(et)
+	if !strings.Contains(string(data), `"kind":"product"`) {
+		t.Error("kind should appear in JSON")
+	}
+
+	et2 := EntityTrace{EntityID: "p_2", Events: []Event{}}
+	data, _ = json.Marshal(et2)
+	if strings.Contains(string(data), "kind") {
+		t.Error("empty kind should be omitted from JSON")
+	}
+}
+
+func TestScope(t *testing.T) {
+	ctx := New(context.Background())
+	products := NewScope(ctx, "product")
+	products.Track("p_1", map[string]any{"name": "Widget"})
+	products.Track("p_2", map[string]any{"name": "Gadget"})
+	products.RecordEvent("p_1", "ranking", "scored", map[string]any{"score": 0.9})
+	products.RecordEvent("p_2", "ranking", "scored", map[string]any{"score": 0.7})
+
+	trace := Collect(ctx)
+	if len(trace.Entities) != 2 {
+		t.Fatalf("expected 2 entities, got %d", len(trace.Entities))
+	}
+	if trace.Entities["p_1"].Kind != "product" {
+		t.Error("p_1 should have kind 'product'")
+	}
+	if trace.Entities["p_2"].Kind != "product" {
+		t.Error("p_2 should have kind 'product'")
+	}
+	if len(trace.Entities["p_1"].Events) != 1 {
+		t.Error("expected 1 event for p_1")
+	}
+}
+
+func TestMultipleScopes(t *testing.T) {
+	ctx := New(context.Background())
+
+	products := NewScope(ctx, "product")
+	orders := NewScope(ctx, "order")
+
+	products.Track("p_1", map[string]any{"name": "Widget"})
+	products.RecordEvent("p_1", "search", "found", nil)
+
+	orders.Track("o_1", map[string]any{"total": 42})
+	orders.RecordEvent("o_1", "validation", "passed", nil)
+
+	Record(ctx, "request", "processed", nil)
+
+	trace := Collect(ctx)
+	if len(trace.Entities) != 2 {
+		t.Fatalf("expected 2 entities, got %d", len(trace.Entities))
+	}
+	if trace.Entities["p_1"].Kind != "product" {
+		t.Error("p_1 should be product")
+	}
+	if trace.Entities["o_1"].Kind != "order" {
+		t.Error("o_1 should be order")
+	}
+	if len(trace.Events) != 1 {
+		t.Error("expected 1 unscoped event")
+	}
+}
+
+func TestScopeDisabled(t *testing.T) {
+	products := NewScope(context.Background(), "product")
+	products.Track("p_1", nil)
+	products.RecordEvent("p_1", "s", "a", nil)
+}
+
+// ---------------------------------------------------------------------------
+// Trace metadata
+// ---------------------------------------------------------------------------
+
+func TestWithTraceMeta(t *testing.T) {
+	meta := map[string]any{"request_id": "req_123", "user_id": "u_456"}
+	ctx := New(context.Background(), WithTraceMeta(meta))
+
+	trace := Collect(ctx)
+	if trace.Meta["request_id"] != "req_123" {
+		t.Error("expected request_id in trace meta")
+	}
+	if trace.Meta["user_id"] != "u_456" {
+		t.Error("expected user_id in trace meta")
+	}
+}
+
+func TestWithTraceMetaIsolation(t *testing.T) {
+	orig := map[string]any{"k": "v"}
+	ctx := New(context.Background(), WithTraceMeta(orig))
+
+	orig["k"] = "mutated"
+
+	trace := Collect(ctx)
+	if trace.Meta["k"] != "v" {
+		t.Error("trace meta should be cloned from input")
+	}
+}
+
+func TestWithTraceMetaDeepCopy(t *testing.T) {
+	ctx := New(context.Background(), WithTraceMeta(map[string]any{"k": "v"}))
+	t1 := Collect(ctx)
+	t1.Meta["injected"] = true
+	t2 := Collect(ctx)
+	if t2.Meta["injected"] != nil {
+		t.Error("mutating collected trace meta must not affect internal state")
+	}
+}
+
+func TestWithTraceMetaNil(t *testing.T) {
+	ctx := New(context.Background())
+	trace := Collect(ctx)
+	if trace.Meta != nil {
+		t.Error("trace meta should be nil when WithTraceMeta is not used")
+	}
+}
+
+func TestWithTraceMetaJSON(t *testing.T) {
+	ctx := New(context.Background(), WithTraceMeta(map[string]any{"req": "123"}))
+	Record(ctx, "s", "a", nil)
+
+	trace := Collect(ctx)
+	data, err := json.Marshal(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(data)
+	if !strings.Contains(s, `"meta"`) {
+		t.Error("trace meta should appear in JSON")
+	}
+	if !strings.Contains(s, `"req"`) {
+		t.Error("trace meta key should appear in JSON")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Concurrency
 // ---------------------------------------------------------------------------
 
@@ -608,11 +786,256 @@ func TestJSONOmitEmpty(t *testing.T) {
 	tr := Trace{}
 	data, _ = json.Marshal(tr)
 	s := string(data)
+	if strings.Contains(s, `"meta"`) {
+		t.Error("nil trace meta should be omitted")
+	}
 	if strings.Contains(s, "entities") {
 		t.Error("nil entities should be omitted")
 	}
 	if strings.Contains(s, "events") {
 		t.Error("nil events should be omitted")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Entity filter
+// ---------------------------------------------------------------------------
+
+func TestWithEntityFilter(t *testing.T) {
+	ctx := New(context.Background(), WithEntityFilter(func(id string) bool {
+		return id == "wanted"
+	}))
+
+	Track(ctx, "wanted", map[string]any{"ok": true})
+	Track(ctx, "blocked", map[string]any{"nope": true})
+	RecordEntity(ctx, "wanted", "s", "a", nil)
+	RecordEntity(ctx, "blocked", "s", "a", nil)
+	Record(ctx, "unscoped", "always", nil)
+
+	trace := Collect(ctx)
+	if len(trace.Entities) != 1 {
+		t.Fatalf("expected 1 entity, got %d", len(trace.Entities))
+	}
+	if _, ok := trace.Entities["wanted"]; !ok {
+		t.Error("wanted entity should exist")
+	}
+	if _, ok := trace.Entities["blocked"]; ok {
+		t.Error("blocked entity should not exist")
+	}
+	if len(trace.Events) != 1 {
+		t.Error("unscoped events must not be filtered")
+	}
+}
+
+func TestWithEntityFilterNil(t *testing.T) {
+	ctx := New(context.Background())
+	Track(ctx, "e1", nil)
+	RecordEntity(ctx, "e2", "s", "a", nil)
+
+	trace := Collect(ctx)
+	if len(trace.Entities) != 2 {
+		t.Fatalf("nil filter should allow all entities; got %d", len(trace.Entities))
+	}
+}
+
+func TestWithEntityFilterAcceptAll(t *testing.T) {
+	ctx := New(context.Background(), WithEntityFilter(func(string) bool { return true }))
+	Track(ctx, "a", nil)
+	Track(ctx, "b", nil)
+
+	trace := Collect(ctx)
+	if len(trace.Entities) != 2 {
+		t.Fatalf("accept-all filter should allow all entities; got %d", len(trace.Entities))
+	}
+}
+
+func TestWithEntityFilterRejectAll(t *testing.T) {
+	ctx := New(context.Background(), WithEntityFilter(func(string) bool { return false }))
+	Track(ctx, "a", nil)
+	RecordEntity(ctx, "b", "s", "a", nil)
+
+	trace := Collect(ctx)
+	if len(trace.Entities) != 0 {
+		t.Fatalf("reject-all filter should block all entities; got %d", len(trace.Entities))
+	}
+}
+
+func TestWithEntityFilterScope(t *testing.T) {
+	ctx := New(context.Background(), WithEntityFilter(func(id string) bool {
+		return id == "p_1"
+	}))
+	products := NewScope(ctx, "product")
+	products.Track("p_1", nil)
+	products.Track("p_2", nil)
+	products.RecordEvent("p_1", "s", "a", nil)
+	products.RecordEvent("p_2", "s", "a", nil)
+
+	trace := Collect(ctx)
+	if len(trace.Entities) != 1 {
+		t.Fatalf("filter should apply through Scope; got %d entities", len(trace.Entities))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Auto-instrumentation
+// ---------------------------------------------------------------------------
+
+func TestStep(t *testing.T) {
+	ctx := New(context.Background())
+	Step(ctx, "started", nil)
+
+	trace := Collect(ctx)
+	if len(trace.Events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(trace.Events))
+	}
+	if trace.Events[0].Stage != "TestStep" {
+		t.Errorf("expected stage 'TestStep', got '%s'", trace.Events[0].Stage)
+	}
+	if trace.Events[0].Action != "started" {
+		t.Errorf("expected action 'started', got '%s'", trace.Events[0].Action)
+	}
+}
+
+func TestStepDisabled(t *testing.T) {
+	Step(context.Background(), "noop", nil)
+}
+
+func TestStepEntity(t *testing.T) {
+	ctx := New(context.Background())
+	StepEntity(ctx, "order_1", "scored", map[string]any{"score": 0.9})
+
+	trace := Collect(ctx)
+	et := trace.Entities["order_1"]
+	if len(et.Events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(et.Events))
+	}
+	if et.Events[0].Stage != "TestStepEntity" {
+		t.Errorf("expected stage 'TestStepEntity', got '%s'", et.Events[0].Stage)
+	}
+	if et.Events[0].Action != "scored" {
+		t.Errorf("expected action 'scored', got '%s'", et.Events[0].Action)
+	}
+}
+
+func TestStepEntityDisabled(t *testing.T) {
+	StepEntity(context.Background(), "e1", "noop", nil)
+}
+
+func TestStepEntityFiltered(t *testing.T) {
+	ctx := New(context.Background(), WithEntityFilter(func(id string) bool {
+		return id == "wanted"
+	}))
+	StepEntity(ctx, "wanted", "ok", nil)
+	StepEntity(ctx, "blocked", "nope", nil)
+
+	trace := Collect(ctx)
+	if len(trace.Entities) != 1 {
+		t.Fatalf("filter should apply to StepEntity; got %d entities", len(trace.Entities))
+	}
+}
+
+func TestEnter(t *testing.T) {
+	fixed := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	callNum := 0
+	ctx := New(context.Background(), WithClock(func() time.Time {
+		callNum++
+		return fixed.Add(time.Duration(callNum) * 100 * time.Millisecond)
+	}))
+
+	exit := Enter(ctx, map[string]any{"request": true})
+	exit()
+
+	trace := Collect(ctx)
+	if len(trace.Events) != 2 {
+		t.Fatalf("expected 2 events (enter+exit), got %d", len(trace.Events))
+	}
+	if trace.Events[0].Stage != "TestEnter" {
+		t.Errorf("expected stage 'TestEnter', got '%s'", trace.Events[0].Stage)
+	}
+	if trace.Events[0].Action != "entered" {
+		t.Errorf("expected action 'entered', got '%s'", trace.Events[0].Action)
+	}
+	if trace.Events[1].Action != "exited" {
+		t.Errorf("expected action 'exited', got '%s'", trace.Events[1].Action)
+	}
+	dur, ok := trace.Events[1].Meta["duration_ms"].(float64)
+	if !ok || dur <= 0 {
+		t.Errorf("exit event should have positive duration_ms, got %v", trace.Events[1].Meta["duration_ms"])
+	}
+}
+
+func TestEnterDisabled(t *testing.T) {
+	exit := Enter(context.Background(), nil)
+	exit()
+}
+
+func TestEnterEntity(t *testing.T) {
+	fixed := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	callNum := 0
+	ctx := New(context.Background(), WithClock(func() time.Time {
+		callNum++
+		return fixed.Add(time.Duration(callNum) * 50 * time.Millisecond)
+	}))
+
+	exit := EnterEntity(ctx, "order_1", nil)
+	exit()
+
+	trace := Collect(ctx)
+	et := trace.Entities["order_1"]
+	if len(et.Events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(et.Events))
+	}
+	if et.Events[0].Stage != "TestEnterEntity" {
+		t.Errorf("expected stage 'TestEnterEntity', got '%s'", et.Events[0].Stage)
+	}
+	if et.Events[0].Action != "entered" {
+		t.Error("first event should be 'entered'")
+	}
+	if et.Events[1].Action != "exited" {
+		t.Error("second event should be 'exited'")
+	}
+	dur, ok := et.Events[1].Meta["duration_ms"].(float64)
+	if !ok || dur <= 0 {
+		t.Errorf("exit event should have positive duration_ms, got %v", et.Events[1].Meta["duration_ms"])
+	}
+}
+
+func TestEnterEntityDisabled(t *testing.T) {
+	exit := EnterEntity(context.Background(), "e1", nil)
+	exit()
+}
+
+func TestEnterEntityFiltered(t *testing.T) {
+	ctx := New(context.Background(), WithEntityFilter(func(id string) bool {
+		return id == "wanted"
+	}))
+
+	exitWanted := EnterEntity(ctx, "wanted", nil)
+	exitWanted()
+	exitBlocked := EnterEntity(ctx, "blocked", nil)
+	exitBlocked()
+
+	trace := Collect(ctx)
+	if len(trace.Entities) != 1 {
+		t.Fatalf("filter should apply to EnterEntity; got %d entities", len(trace.Entities))
+	}
+}
+
+func TestCleanFuncName(t *testing.T) {
+	tests := []struct {
+		input, want string
+	}{
+		{"github.com/user/pkg.Function", "Function"},
+		{"github.com/user/pkg.(*Type).Method", "Type.Method"},
+		{"github.com/user/pkg.Function.func1", "Function.func1"},
+		{"main.main", "main"},
+		{"pkg.init", "init"},
+	}
+	for _, tc := range tests {
+		got := cleanFuncName(tc.input)
+		if got != tc.want {
+			t.Errorf("cleanFuncName(%q) = %q, want %q", tc.input, got, tc.want)
+		}
 	}
 }
 

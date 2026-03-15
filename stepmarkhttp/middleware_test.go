@@ -8,8 +8,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/vivekpatidar/stepmark"
-	"github.com/vivekpatidar/stepmark/stepmarkhttp"
+	"github.com/ImVivec/stepmark"
+	"github.com/ImVivec/stepmark/stepmarkhttp"
 )
 
 func TestMiddleware_HeaderTrigger_Enabled(t *testing.T) {

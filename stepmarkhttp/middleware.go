@@ -1,11 +1,3 @@
-// Package stepmarkhttp provides [net/http] middleware for Stepmark.
-//
-// The middleware conditionally enables tracing based on a [TriggerFunc]
-// (e.g. a request header or query parameter) and optionally writes the
-// collected trace to a response header or passes it to a callback.
-//
-// Works out of the box with the standard library, Chi, and any router
-// that accepts the func(http.Handler) http.Handler middleware signature.
 package stepmarkhttp
 
 import (
@@ -14,7 +6,7 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/vivekpatidar/stepmark"
+	"github.com/ImVivec/stepmark"
 )
 
 // TriggerFunc decides whether tracing should be enabled for a request.

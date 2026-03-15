@@ -99,3 +99,63 @@ func BenchmarkRecordEntity_Disabled_NilMeta(b *testing.B) {
 		RecordEntity(ctx, "entity_1", "stage", "action", nil)
 	}
 }
+
+func BenchmarkStep_Disabled(b *testing.B) {
+	ctx := context.Background()
+	b.ReportAllocs()
+	for b.Loop() {
+		Step(ctx, "action", nil)
+	}
+}
+
+func BenchmarkStep_Enabled(b *testing.B) {
+	ctx := New(context.Background())
+	b.ReportAllocs()
+	for b.Loop() {
+		Step(ctx, "action", nil)
+	}
+}
+
+func BenchmarkStepEntity_Disabled(b *testing.B) {
+	ctx := context.Background()
+	b.ReportAllocs()
+	for b.Loop() {
+		StepEntity(ctx, "entity_1", "action", nil)
+	}
+}
+
+func BenchmarkEnter_Disabled(b *testing.B) {
+	ctx := context.Background()
+	b.ReportAllocs()
+	for b.Loop() {
+		Enter(ctx, nil)()
+	}
+}
+
+func BenchmarkEnterEntity_Disabled(b *testing.B) {
+	ctx := context.Background()
+	b.ReportAllocs()
+	for b.Loop() {
+		EnterEntity(ctx, "entity_1", nil)()
+	}
+}
+
+func BenchmarkRecordEntity_Filtered(b *testing.B) {
+	ctx := New(context.Background(), WithEntityFilter(func(id string) bool {
+		return id == "wanted"
+	}))
+	b.ReportAllocs()
+	for b.Loop() {
+		RecordEntity(ctx, "blocked", "stage", "action", nil)
+	}
+}
+
+func BenchmarkStepEntity_Filtered(b *testing.B) {
+	ctx := New(context.Background(), WithEntityFilter(func(id string) bool {
+		return id == "wanted"
+	}))
+	b.ReportAllocs()
+	for b.Loop() {
+		StepEntity(ctx, "blocked", "action", nil)
+	}
+}

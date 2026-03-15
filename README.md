@@ -2,7 +2,8 @@
 
 **On-Demand Business Logic Tracer for Go**
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/vivekpatidar/stepmark.svg)](https://pkg.go.dev/github.com/vivekpatidar/stepmark)
+[![Go Reference](https://pkg.go.dev/badge/github.com/ImVivec/stepmark.svg)](https://pkg.go.dev/github.com/ImVivec/stepmark)
+[![CI](https://github.com/ImVivec/stepmark/actions/workflows/ci.yml/badge.svg)](https://github.com/ImVivec/stepmark/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Standard logs are noisy. APM tools track latency, not logic. Stepmark traces the **decision-making journey** of specific entities — orders, users, search results — through your codebase. On demand, with zero overhead when off.
@@ -24,7 +25,7 @@ Stepmark gives you a structured audit trail of every decision point, but **only 
 ## Install
 
 ```bash
-go get github.com/vivekpatidar/stepmark
+go get github.com/ImVivec/stepmark
 ```
 
 Zero external dependencies. Only uses the Go standard library.
@@ -41,7 +42,7 @@ import (
     "encoding/json"
     "fmt"
 
-    "github.com/vivekpatidar/stepmark"
+    "github.com/ImVivec/stepmark"
 )
 
 func main() {
@@ -99,30 +100,68 @@ BenchmarkRecordEntity_Disabled        660M      1.86 ns/op    0 B/op   0 allocs/
 BenchmarkTrack_Disabled               680M      1.76 ns/op    0 B/op   0 allocs/op
 ```
 
-Put `stepmark.Record(...)` calls throughout your hot paths. When nobody is tracing, each call costs **< 2 nanoseconds**.
+Put `stepmark.Record(...)` calls throughout your hot paths. When nobody is tracing, each call costs **< 2 nanoseconds**. Auto-instrumentation (`Step`, `Enter`) and entity filtering maintain the same guarantee:
+
+```
+BenchmarkStep_Disabled                611M      1.96 ns/op    0 B/op   0 allocs/op
+BenchmarkStepEntity_Disabled          674M      1.78 ns/op    0 B/op   0 allocs/op
+BenchmarkEnter_Disabled               607M      1.98 ns/op    0 B/op   0 allocs/op
+BenchmarkEnterEntity_Disabled         375M      2.69 ns/op    0 B/op   0 allocs/op
+BenchmarkRecordEntity_Filtered        279M      4.23 ns/op    0 B/op   0 allocs/op
+```
 
 When tracing *is* enabled (the rare debug case):
 
 ```
-BenchmarkEnabled_Enabled              406M      2.96 ns/op    0 B/op   0 allocs/op
-BenchmarkRecord_Enabled               5.6M      226  ns/op    704 B/op 2 allocs/op
-BenchmarkRecordEntity_Enabled         4.9M      264  ns/op    690 B/op 3 allocs/op
+BenchmarkEnabled_Enabled              407M      2.96 ns/op    0 B/op   0 allocs/op
+BenchmarkRecord_Enabled               5.7M      234  ns/op    682 B/op 2 allocs/op
+BenchmarkRecordEntity_Enabled         5.2M      242  ns/op    724 B/op 3 allocs/op
+BenchmarkStep_Enabled                 3.6M      327  ns/op    596 B/op 2 allocs/op
 ```
+
+`Step`/`Enter` cost ~100ns more than `Record` when enabled due to `runtime.Caller` — the price of auto-detecting the function name. This only runs on the tracing-enabled path.
 
 ---
 
 ## API
 
-The entire public API is **6 functions**:
+**Core** — the complete tracing lifecycle:
 
 | Function | Purpose |
 |---|---|
 | `New(ctx, ...Option) context.Context` | Start tracing — injects a tracer into the context |
 | `Enabled(ctx) bool` | Check if tracing is active (< 2ns fast path) |
-| `Track(ctx, entityID, meta)` | Register an entity with optional metadata |
+| `Track(ctx, entityID, meta, ...TrackOption)` | Register an entity with optional metadata and kind |
 | `RecordEntity(ctx, entityID, stage, action, meta)` | Record an event for a specific entity |
 | `Record(ctx, stage, action, meta)` | Record an unscoped event (not tied to an entity) |
 | `Collect(ctx) *Trace` | Extract a deep-copied snapshot of all recorded data |
+
+**Auto-Instrumentation** — the function name *is* the stage:
+
+| Function | Purpose |
+|---|---|
+| `Step(ctx, action, meta)` | Record an event using the caller's function name as stage |
+| `StepEntity(ctx, entityID, action, meta)` | Record an entity event using the caller's function name |
+| `Enter(ctx, meta) func()` | Record function entry/exit with duration (use with `defer`) |
+| `EnterEntity(ctx, entityID, meta) func()` | Record entity function entry/exit with duration |
+
+**Helpers** — ergonomics for common patterns:
+
+| Function / Type | Purpose |
+|---|---|
+| `NewScope(ctx, kind) Scope` | Create a scoped recorder that auto-sets entity kind |
+| `Scope.Track(entityID, meta)` | Track an entity within the scope |
+| `Scope.RecordEvent(entityID, stage, action, meta)` | Record an event within the scope |
+
+**Options:**
+
+| Option | Purpose |
+|---|---|
+| `WithMaxEvents(n)` | Cap total events to prevent unbounded growth |
+| `WithClock(fn)` | Custom time source for deterministic tests |
+| `WithTraceMeta(meta)` | Attach request-level metadata to the trace |
+| `WithEntityFilter(fn)` | Only trace entities matching a predicate |
+| `WithKind(kind)` | Classify an entity by type (used with `Track`) |
 
 **Every function is a no-op when tracing is disabled.** You never need to guard with `if stepmark.Enabled(ctx)` for correctness — only as an optional optimization to avoid allocating a `map[string]any` literal on the hot path.
 
@@ -135,7 +174,7 @@ The `stepmarkhttp` subpackage provides ready-made middleware for `net/http` and 
 ### Standard Library
 
 ```go
-import "github.com/vivekpatidar/stepmark/stepmarkhttp"
+import "github.com/ImVivec/stepmark/stepmarkhttp"
 
 mux := http.NewServeMux()
 mux.Handle("/api/", stepmarkhttp.Middleware(
@@ -286,61 +325,262 @@ func StepmarkInterceptor(
 
 ---
 
-## Real-World Example
+## Auto-Instrumentation
 
-A search API that traces how products are ranked, filtered, and scored:
+Manually specifying stage names as strings is tedious and error-prone. The auto-instrumentation API uses `runtime.Caller` to derive the stage from the calling function's name — automatically.
+
+### `Step` / `StepEntity` — the function name is the stage
+
+```go
+func ValidateOrder(ctx context.Context, order Order) error {
+    // stage is automatically set to "ValidateOrder"
+    stepmark.Step(ctx, "started", nil)
+
+    if order.Total > 10000 {
+        stepmark.Step(ctx, "flagged_high_value", map[string]any{"total": order.Total})
+    }
+    stepmark.Step(ctx, "passed", nil)
+    return nil
+}
+
+func ScoreProduct(ctx context.Context, productID string, score float64) {
+    // stage is automatically set to "ScoreProduct", scoped to productID
+    stepmark.StepEntity(ctx, productID, "scored", map[string]any{"score": score})
+}
+```
+
+### `Enter` / `EnterEntity` — function boundary tracing with duration
+
+Wrap an entire function with a single `defer` line. Stepmark records "entered" at the top and "exited" (with `duration_ms`) when the function returns:
+
+```go
+func ChargePayment(ctx context.Context, orderID string) error {
+    defer stepmark.EnterEntity(ctx, orderID, nil)()
+    // Records:
+    //   { stage: "ChargePayment", action: "entered" }
+    //   ... your logic runs ...
+    //   { stage: "ChargePayment", action: "exited", meta: { duration_ms: 12.5 } }
+
+    return processPayment(ctx, orderID)
+}
+
+func ProcessRequest(ctx context.Context) {
+    defer stepmark.Enter(ctx, map[string]any{"path": "/checkout"})()
+    // Unscoped enter/exit events with stage = "ProcessRequest"
+}
+```
+
+### When to use what
+
+| Situation | Use |
+|---|---|
+| You want a named stage like `"validation"` | `Record` / `RecordEntity` |
+| The function name *is* the stage | `Step` / `StepEntity` |
+| You want enter/exit with duration | `Enter` / `EnterEntity` |
+| You're tracking many entities of the same kind | `Scope` + `RecordEvent` |
+
+**Performance note:** `Step` and `Enter` cost ~100ns more than `Record` when tracing is enabled (due to `runtime.Caller`). When disabled, they are identical: **< 2ns, 0 allocs**.
+
+---
+
+## Conditional Entity Recording
+
+When you only care about specific entities — a particular order, the top-10 search results, a flagged user — use `WithEntityFilter` to skip the rest. Filtered entities avoid the lock entirely, staying close to disabled-path performance (~4ns):
+
+```go
+ctx := stepmark.New(ctx,
+    stepmark.WithEntityFilter(func(entityID string) bool {
+        return entityID == targetOrderID
+    }),
+)
+
+// Only events for targetOrderID are recorded.
+// All other entity calls are no-ops.
+stepmark.RecordEntity(ctx, targetOrderID, "validation", "passed", nil)  // ✓ recorded
+stepmark.RecordEntity(ctx, "other_order", "validation", "passed", nil)  // ✗ skipped
+stepmark.Record(ctx, "request", "processed", nil)                       // ✓ always recorded
+```
+
+The filter applies to all entity-scoped calls: `Track`, `RecordEntity`, `StepEntity`, `EnterEntity`. Unscoped calls (`Record`, `Step`, `Enter`) are never filtered.
+
+```go
+// Filter by a set of interesting entities:
+interestingIDs := map[string]bool{"order_42": true, "order_99": true}
+ctx := stepmark.New(ctx, stepmark.WithEntityFilter(func(id string) bool {
+    return interestingIDs[id]
+}))
+
+// Filter by kind (using naming convention):
+ctx := stepmark.New(ctx, stepmark.WithEntityFilter(func(id string) bool {
+    return strings.HasPrefix(id, "order_")
+}))
+```
+
+---
+
+## Scoped Entity Tracking
+
+When a request touches multiple entity types — products, orders, users — the `Scope` helper groups them by kind without repeating `WithKind` on every call:
 
 ```go
 func SearchHandler(w http.ResponseWriter, r *http.Request) {
     ctx := r.Context()
-    query := r.URL.Query().Get("q")
 
-    stepmark.Record(ctx, "search", "query_received", map[string]any{
-        "query":   query,
-        "user_id": getUserID(ctx),
-    })
-
-    products := catalog.Search(ctx, query)
-    stepmark.Record(ctx, "search", "catalog_returned", map[string]any{
-        "count": len(products),
-    })
-
-    for _, p := range products {
-        stepmark.Track(ctx, p.ID, map[string]any{
-            "name":     p.Name,
-            "category": p.Category,
-        })
+    products := stepmark.NewScope(ctx, "product")
+    for _, p := range catalog.Search(ctx, query) {
+        products.Track(p.ID, map[string]any{"name": p.Name, "category": p.Category})
+        products.RecordEvent(p.ID, "ranking", "scored", map[string]any{"score": p.Score})
     }
 
-    ranked := ranking.Apply(ctx, products) // internally calls RecordEntity per product
-    filtered := filters.Apply(ctx, ranked) // internally calls RecordEntity per product
+    users := stepmark.NewScope(ctx, "user")
+    users.Track(userID, map[string]any{"tier": "premium"})
+    users.RecordEvent(userID, "personalization", "applied", nil)
 
-    stepmark.Record(ctx, "search", "response_ready", map[string]any{
-        "final_count": len(filtered),
-    })
-
-    json.NewEncoder(w).Encode(filtered)
-}
-
-// Inside ranking.Apply:
-func (r *Ranker) Apply(ctx context.Context, products []Product) []Product {
-    for i, p := range products {
-        score := r.model.Score(p)
-        stepmark.RecordEntity(ctx, p.ID, "ranking", "scored", map[string]any{
-            "score":    score,
-            "position": i,
-            "model":    r.modelVersion,
-        })
-        products[i].Score = score
-    }
-    sort.Slice(products, func(i, j int) bool {
-        return products[i].Score > products[j].Score
-    })
-    return products
+    stepmark.Record(ctx, "search", "response_ready", map[string]any{"count": len(results)})
 }
 ```
 
-With the middleware enabled, a single request with `X-Stepmark: true` returns a complete audit trail showing exactly why each product ended up where it did.
+The collected trace groups entities by kind:
+
+```json
+{
+  "entities": {
+    "prod_1": { "entity_id": "prod_1", "kind": "product", "events": [...] },
+    "prod_2": { "entity_id": "prod_2", "kind": "product", "events": [...] },
+    "u_42":   { "entity_id": "u_42",   "kind": "user",    "events": [...] }
+  },
+  "events": [
+    { "stage": "search", "action": "response_ready", "meta": { "count": 2 } }
+  ]
+}
+```
+
+You can also set kind directly without a scope:
+
+```go
+stepmark.Track(ctx, "order_99", meta, stepmark.WithKind("order"))
+```
+
+---
+
+## Trace Metadata
+
+Attach request-level context to the trace itself — not to any specific entity or event:
+
+```go
+ctx := stepmark.New(ctx, stepmark.WithTraceMeta(map[string]any{
+    "request_id":  reqID,
+    "user_id":     userID,
+    "ab_variant":  "checkout_v2",
+}))
+```
+
+This appears at the top level of the collected trace:
+
+```json
+{
+  "meta": { "request_id": "req_abc", "user_id": "u_42", "ab_variant": "checkout_v2" },
+  "entities": { ... },
+  "events": [ ... ]
+}
+```
+
+---
+
+## Use Cases
+
+### E-Commerce: Search Ranking Pipeline
+
+Track why each product ended up at its position — across search, ranking, filtering, and personalization:
+
+```go
+products := stepmark.NewScope(ctx, "product")
+for _, p := range catalogResults {
+    products.Track(p.ID, map[string]any{"name": p.Name})
+}
+
+// Inside the ranker:
+products.RecordEvent(p.ID, "ranking", "ml_scored", map[string]any{
+    "score": 0.92, "model": "v3", "features": featureCount,
+})
+
+// Inside the filter:
+products.RecordEvent(p.ID, "filter", "excluded", map[string]any{
+    "reason": "out_of_stock",
+})
+```
+
+### Order Processing: Audit Trail
+
+Trace every decision an order passes through — from validation to fulfillment:
+
+```go
+stepmark.Track(ctx, orderID, map[string]any{"total": 249.99}, stepmark.WithKind("order"))
+stepmark.RecordEntity(ctx, orderID, "validation", "passed", nil)
+stepmark.RecordEntity(ctx, orderID, "fraud_check", "flagged", map[string]any{
+    "score": 0.78, "model": "fraud_v2", "action": "manual_review",
+})
+stepmark.RecordEntity(ctx, orderID, "inventory", "reserved", map[string]any{
+    "warehouse": "us-east-1", "items": 3,
+})
+```
+
+### ML Inference: Decision Explainability
+
+Trace why a model made a specific prediction — features, thresholds, fallback logic:
+
+```go
+stepmark.Track(ctx, predictionID, nil, stepmark.WithKind("prediction"))
+stepmark.RecordEntity(ctx, predictionID, "features", "extracted", map[string]any{
+    "count": 128, "source": "feature_store_v2",
+})
+stepmark.RecordEntity(ctx, predictionID, "model", "scored", map[string]any{
+    "model": "xgboost_v4", "confidence": 0.91, "latency_ms": 12,
+})
+stepmark.RecordEntity(ctx, predictionID, "threshold", "passed", map[string]any{
+    "min_confidence": 0.85, "action": "auto_approve",
+})
+```
+
+### Content Moderation Pipeline
+
+Trace why content was approved, flagged, or rejected — across multiple rules and models:
+
+```go
+stepmark.Track(ctx, contentID, map[string]any{"type": "comment"}, stepmark.WithKind("content"))
+stepmark.RecordEntity(ctx, contentID, "toxicity", "scored", map[string]any{
+    "score": 0.12, "model": "perspective_v2",
+})
+stepmark.RecordEntity(ctx, contentID, "spam", "cleared", map[string]any{
+    "score": 0.03, "threshold": 0.5,
+})
+stepmark.RecordEntity(ctx, contentID, "pii", "detected", map[string]any{
+    "fields": []string{"email", "phone"}, "action": "redact",
+})
+stepmark.RecordEntity(ctx, contentID, "moderation", "approved", map[string]any{
+    "auto": true, "policy": "standard_v3",
+})
+```
+
+### Multi-Service Debugging
+
+Combine Stepmark with trace metadata to correlate across services:
+
+```go
+// Service A: API Gateway
+ctx := stepmark.New(ctx, stepmark.WithTraceMeta(map[string]any{
+    "trace_id":   traceID,
+    "service":    "api-gateway",
+    "request_id": reqID,
+}))
+stepmark.Record(ctx, "routing", "backend_selected", map[string]any{
+    "backend": "search-v2", "reason": "canary_10pct",
+})
+
+// Collect and pass downstream via header, log, or message queue.
+// Service B can create its own trace with the same trace_id
+// for later correlation.
+```
 
 ---
 
@@ -353,6 +593,17 @@ ctx := stepmark.New(ctx, stepmark.WithMaxEvents(1000))
 // Inject a fixed clock for deterministic tests.
 fixed := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 ctx := stepmark.New(ctx, stepmark.WithClock(func() time.Time { return fixed }))
+
+// Attach request-level context.
+ctx := stepmark.New(ctx, stepmark.WithTraceMeta(map[string]any{
+    "request_id": reqID,
+    "user_id":    userID,
+}))
+
+// Only trace specific entities.
+ctx := stepmark.New(ctx, stepmark.WithEntityFilter(func(id string) bool {
+    return id == targetOrderID
+}))
 ```
 
 ---
@@ -374,11 +625,12 @@ type Event struct {
 
 ### EntityTrace
 
-All events for one tracked entity.
+All events for one tracked entity. `Kind` groups entities by type.
 
 ```go
 type EntityTrace struct {
     EntityID string         `json:"entity_id"`
+    Kind     string         `json:"kind,omitempty"`
     Meta     map[string]any `json:"meta,omitempty"`
     Events   []Event        `json:"events"`
 }
@@ -390,6 +642,7 @@ The complete output from `Collect`. Ready for `json.Marshal`.
 
 ```go
 type Trace struct {
+    Meta     map[string]any         `json:"meta,omitempty"`
     Entities map[string]EntityTrace `json:"entities,omitempty"`
     Events   []Event                `json:"events,omitempty"`
 }
@@ -429,6 +682,14 @@ No. When tracing is not enabled, every call is a single `context.Value()` lookup
 
 Use `WithMaxEvents(n)` when creating the tracer. Once the cap is reached, new events are silently dropped. Track metadata (`Track()` calls) is not counted toward the limit.
 
+**Q: When should I use `Step` vs `Record`?**
+
+Use `Record` when you want a specific, human-readable stage name like `"validation"` or `"fraud_check"`. Use `Step` when the function name itself is the stage — it saves you from typing the same string you'd copy from the function declaration. Use `Enter`/`EnterEntity` when you want automatic enter/exit boundary events with duration.
+
+**Q: Does `Step`/`Enter` affect performance when tracing is disabled?**
+
+No. The nil-check returns before `runtime.Caller` is ever called. Disabled-path cost is identical to `Record`: < 2ns, 0 allocs. The `runtime.Caller` overhead (~100ns) only applies when tracing is active.
+
 ---
 
 ## Design Decisions
@@ -438,8 +699,22 @@ Use `WithMaxEvents(n)` when creating the tracer. Once the cap is reached, new ev
 | Context-only, no globals | Traces are scoped to a request. No shared mutable state, no cleanup needed. |
 | `sync.Mutex` over `sync.RWMutex` | `Collect()` is called once per request; `Record()` is called many times. `RWMutex` adds atomic reader-count overhead on every `Record()` for a read-side benefit that's exercised once. |
 | Shallow `cloneMap` | Deep copy requires reflection. Shallow copy isolates the map structure (callers can't add/remove keys) while keeping the common case fast. |
+| `runtime.Caller` only when enabled | Auto-instrumentation (`Step`/`Enter`) pays the ~100ns `runtime.Caller` cost only on the tracing-enabled path. When disabled, the nil-check returns before touching the runtime — same < 2ns as `Record`. |
+| Entity filter before lock | `WithEntityFilter` is checked before acquiring the mutex, so filtered entities never contend. The filter function is set once at creation and never mutated, making the unsynchronized read safe. |
 | No `slog`/`log` integration | Stepmark collects structured data. What you do with it — log it, return it in an API, send it to Kafka — is your choice. Compose `Collect()` with whatever output you need. |
 | Separate `stepmarkhttp` package | Keeps the core library at zero dependencies. You only import the middleware if you need it. |
+
+---
+
+## Contributing
+
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+```bash
+git clone https://github.com/ImVivec/stepmark.git
+cd stepmark
+make check   # fmt + vet + tests
+```
 
 ---
 

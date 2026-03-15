@@ -38,20 +38,31 @@ func Enabled(ctx context.Context) bool {
 // Track registers an entity for tracing with optional metadata.
 // If the entity was already tracked, the new metadata is merged
 // into the existing metadata. No-op when tracing is disabled.
-func Track(ctx context.Context, entityID string, meta map[string]any) {
+//
+// Use [WithKind] to classify entities by type for easier grouping:
+//
+//	stepmark.Track(ctx, "prod_1", meta, stepmark.WithKind("product"))
+func Track(ctx context.Context, entityID string, meta map[string]any, opts ...TrackOption) {
 	t, _ := ctx.Value(contextKey{}).(*tracer)
 	if t == nil {
 		return
 	}
-	t.track(entityID, meta)
+	if t.entityFilter != nil && !t.entityFilter(entityID) {
+		return
+	}
+	t.track(entityID, meta, opts)
 }
 
 // RecordEntity appends an event to the named entity's trace.
 // The entity is auto-created if it has not been tracked yet.
-// No-op when tracing is disabled.
+// No-op when tracing is disabled or when the entity is excluded
+// by [WithEntityFilter].
 func RecordEntity(ctx context.Context, entityID, stage, action string, meta map[string]any) {
 	t, _ := ctx.Value(contextKey{}).(*tracer)
 	if t == nil {
+		return
+	}
+	if t.entityFilter != nil && !t.entityFilter(entityID) {
 		return
 	}
 	t.recordEntity(entityID, stage, action, meta)
