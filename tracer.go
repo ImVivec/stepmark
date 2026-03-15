@@ -1,164 +1,151 @@
-package breadcrumb
+package stepmark
 
 import (
-	"context"
+	"sync"
 	"time"
 )
 
-func newBreadcrumbTracer() *breadcrumbTracer {
-	return &breadcrumbTracer{
-		productTraces: make(map[string]*ProductTrace),
-		globalTraces:  make([]TraceEvent, 0),
+type contextKey struct{}
+
+type tracer struct {
+	mu        sync.Mutex
+	entities  map[string]*entityState
+	events    []Event
+	clock     func() time.Time
+	maxEvents int
+	count     int
+}
+
+type entityState struct {
+	id     string
+	meta   map[string]any
+	events []Event
+}
+
+func newTracer(opts []Option) *tracer {
+	t := &tracer{
+		entities: make(map[string]*entityState),
+		clock:    func() time.Time { return time.Now().UTC() },
 	}
-}
-
-func getBreadcrumbTracer(ctx context.Context) (*breadcrumbTracer, bool) {
-	s, ok := ctx.Value(breadcrumbTracerKey).(*breadcrumbTracer)
-	return s, ok
-}
-
-// WithBreadcrumbTracer returns a child context that carries a new breadcrumb tracer.
-func WithBreadcrumbTracer(ctx context.Context) context.Context {
-	return context.WithValue(ctx, breadcrumbTracerKey, newBreadcrumbTracer())
-}
-
-// IsBreadcrumbTracingEnabled reports whether the context carries a breadcrumb tracer.
-func IsBreadcrumbTracingEnabled(ctx context.Context) bool {
-	if _, ok := ctx.Value(breadcrumbTracerKey).(*breadcrumbTracer); ok {
-		return true
+	for _, opt := range opts {
+		opt(t)
 	}
-	return false
+	return t
 }
 
-// AddProduct registers (or re-initialises) a product in the tracer with optional metadata.
-func AddProduct(ctx context.Context, productID string, meta map[string]interface{}) {
-	tracer, ok := getBreadcrumbTracer(ctx)
-	if !ok {
-		return
-	}
-	tracer.mu.Lock()
-	defer tracer.mu.Unlock()
-	pt, exists := tracer.productTraces[productID]
+func (t *tracer) track(entityID string, meta map[string]any) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	es, exists := t.entities[entityID]
 	if !exists {
-		tracer.productTraces[productID] = &ProductTrace{ProductID: productID, ProductMeta: copyMap(meta), Traces: make([]TraceEvent, 0)}
+		t.entities[entityID] = &entityState{
+			id:     entityID,
+			meta:   cloneMap(meta),
+			events: make([]Event, 0, 4),
+		}
 		return
 	}
-	metaCopy := copyMap(meta)
-	metaCopy["re-initialized"] = true
-	if pt.ProductMeta == nil {
-		pt.ProductMeta = metaCopy
+	if meta == nil {
 		return
 	}
-	for k, v := range metaCopy {
-		pt.ProductMeta[k] = v
+	if es.meta == nil {
+		es.meta = cloneMap(meta)
+		return
+	}
+	for k, v := range meta {
+		es.meta[k] = v
 	}
 }
 
-// RecordProduct appends a trace event to the given product.
-func RecordProduct(ctx context.Context, productID, stage, action string, meta map[string]interface{}) {
-	tracer, ok := getBreadcrumbTracer(ctx)
-	if !ok {
+func (t *tracer) recordEntity(entityID, stage, action string, meta map[string]any) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.maxEvents > 0 && t.count >= t.maxEvents {
 		return
 	}
-	tracer.mu.Lock()
-	defer tracer.mu.Unlock()
 
-	pt, exists := tracer.productTraces[productID]
+	es, exists := t.entities[entityID]
 	if !exists {
-		pt = &ProductTrace{ProductID: productID, Traces: make([]TraceEvent, 0, 4)}
-		tracer.productTraces[productID] = pt
+		es = &entityState{
+			id:     entityID,
+			events: make([]Event, 0, 4),
+		}
+		t.entities[entityID] = es
 	}
-	pt.Traces = append(pt.Traces, TraceEvent{Timestamp: time.Now().UTC(), Stage: stage, Action: action, Meta: copyMap(meta)})
-}
-
-// RecordGlobal appends a trace event to the global (non-product-specific) trace log.
-func RecordGlobal(ctx context.Context, stage, action string, meta map[string]interface{}) {
-	tracer, ok := getBreadcrumbTracer(ctx)
-	if !ok {
-		return
-	}
-	tracer.mu.Lock()
-	defer tracer.mu.Unlock()
-
-	tracer.globalTraces = append(tracer.globalTraces, TraceEvent{
-		Timestamp: time.Now().UTC(),
+	es.events = append(es.events, Event{
 		Stage:     stage,
 		Action:    action,
-		Meta:      copyMap(meta),
+		Timestamp: t.clock(),
+		Meta:      cloneMap(meta),
 	})
+	t.count++
 }
 
-// GetGlobalTraces returns a deep-copied slice of all global trace events.
-func GetGlobalTraces(ctx context.Context) []TraceEvent {
-	tracer, ok := getBreadcrumbTracer(ctx)
-	if !ok {
-		return nil
-	}
-	tracer.mu.RLock()
-	defer tracer.mu.RUnlock()
+func (t *tracer) record(stage, action string, meta map[string]any) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 
-	if len(tracer.globalTraces) == 0 {
-		return nil
+	if t.maxEvents > 0 && t.count >= t.maxEvents {
+		return
 	}
 
-	out := make([]TraceEvent, len(tracer.globalTraces))
-	for i, trace := range tracer.globalTraces {
-		out[i] = TraceEvent{
-			Stage:     trace.Stage,
-			Action:    trace.Action,
-			Timestamp: trace.Timestamp,
-			Meta:      copyMap(trace.Meta),
-		}
-	}
-	return out
+	t.events = append(t.events, Event{
+		Stage:     stage,
+		Action:    action,
+		Timestamp: t.clock(),
+		Meta:      cloneMap(meta),
+	})
+	t.count++
 }
 
-// GetProductTraces returns a deep-copied map of all per-product traces.
-func GetProductTraces(ctx context.Context) map[string]ProductTrace {
-	tracer, ok := getBreadcrumbTracer(ctx)
-	if !ok {
-		return nil
-	}
-	tracer.mu.RLock()
-	defer tracer.mu.RUnlock()
-	out := make(map[string]ProductTrace, len(tracer.productTraces))
-	for _, v := range tracer.productTraces {
-		trCopy := make([]TraceEvent, len(v.Traces))
-		for i, trace := range v.Traces {
-			trCopy[i] = TraceEvent{
-				Stage:     trace.Stage,
-				Action:    trace.Action,
-				Timestamp: trace.Timestamp,
-				Meta:      copyMap(trace.Meta),
+func (t *tracer) collect() *Trace {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	trace := &Trace{}
+
+	if len(t.entities) > 0 {
+		trace.Entities = make(map[string]EntityTrace, len(t.entities))
+		for id, es := range t.entities {
+			events := make([]Event, len(es.events))
+			for i, e := range es.events {
+				events[i] = Event{
+					Stage:     e.Stage,
+					Action:    e.Action,
+					Timestamp: e.Timestamp,
+					Meta:      cloneMap(e.Meta),
+				}
+			}
+			trace.Entities[id] = EntityTrace{
+				EntityID: es.id,
+				Meta:     cloneMap(es.meta),
+				Events:   events,
 			}
 		}
-		var pm map[string]interface{}
-		if v.ProductMeta != nil {
-			pm = copyMap(v.ProductMeta)
+	}
+
+	if len(t.events) > 0 {
+		trace.Events = make([]Event, len(t.events))
+		for i, e := range t.events {
+			trace.Events[i] = Event{
+				Stage:     e.Stage,
+				Action:    e.Action,
+				Timestamp: e.Timestamp,
+				Meta:      cloneMap(e.Meta),
+			}
 		}
-		out[v.ProductID] = ProductTrace{ProductID: v.ProductID, ProductMeta: pm, Traces: trCopy}
 	}
-	return out
+
+	return trace
 }
 
-// GetBreadcrumbParams is a convenience function that collects all traces
-// into a single BreadcrumbParams value, ready for serialisation.
-// Returns nil when tracing is not enabled on the context.
-func GetBreadcrumbParams(ctx context.Context) *BreadcrumbParams {
-	if !IsBreadcrumbTracingEnabled(ctx) {
-		return nil
-	}
-	return &BreadcrumbParams{
-		ProductTraces: GetProductTraces(ctx),
-		GlobalTraces:  GetGlobalTraces(ctx),
-	}
-}
-
-func copyMap(in map[string]interface{}) map[string]interface{} {
+func cloneMap(in map[string]any) map[string]any {
 	if in == nil {
 		return nil
 	}
-	out := make(map[string]interface{}, len(in))
+	out := make(map[string]any, len(in))
 	for k, v := range in {
 		out[k] = v
 	}

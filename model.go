@@ -1,34 +1,25 @@
-package breadcrumb
+package stepmark
 
-import (
-	"sync"
-	"time"
-)
+import "time"
 
-const breadcrumbTracerKey = "__breadcrumb_tracer__"
-
-type ProductTrace struct {
-	ProductID   string                 `json:"product_id"`
-	ProductMeta map[string]interface{} `json:"product_meta,omitempty"`
-	Traces      []TraceEvent           `json:"traces"`
+// Event is a single recorded step in a trace.
+type Event struct {
+	Stage     string         `json:"stage"`
+	Action    string         `json:"action"`
+	Timestamp time.Time      `json:"timestamp"`
+	Meta      map[string]any `json:"meta,omitempty"`
 }
 
-type TraceEvent struct {
-	Stage     string                 `json:"stage"`
-	Action    string                 `json:"action"`
-	Timestamp time.Time              `json:"timestamp"`
-	Meta      map[string]interface{} `json:"meta,omitempty"`
+// EntityTrace holds the ordered events for a single tracked entity.
+type EntityTrace struct {
+	EntityID string         `json:"entity_id"`
+	Meta     map[string]any `json:"meta,omitempty"`
+	Events   []Event        `json:"events"`
 }
 
-// BreadcrumbParams holds the collected tracing data, ready for
-// serialisation into an API response or any other consumer.
-type BreadcrumbParams struct {
-	ProductTraces map[string]ProductTrace `json:"productTraces"`
-	GlobalTraces  []TraceEvent            `json:"globalTraces,omitempty"`
-}
-
-type breadcrumbTracer struct {
-	mu            sync.RWMutex
-	productTraces map[string]*ProductTrace
-	globalTraces  []TraceEvent
+// Trace is the complete collected output, containing per-entity
+// traces and unscoped events not pinned to any entity.
+type Trace struct {
+	Entities map[string]EntityTrace `json:"entities,omitempty"`
+	Events   []Event                `json:"events,omitempty"`
 }

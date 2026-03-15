@@ -1,3 +1,3 @@
-module github.com/temp/breadcrumb
+module github.com/vivekpatidar/stepmark
 
 go 1.25.4
