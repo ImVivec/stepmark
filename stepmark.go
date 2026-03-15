@@ -1,3 +1,22 @@
+// Package stepmark is an on-demand business logic tracer for Go.
+//
+// Stepmark traces the decision-making journey of specific entities —
+// orders, users, search results — through complex codebases. It is
+// designed for production use: when tracing is not enabled, every call
+// is a sub-2ns no-op with zero allocations.
+//
+// # Quick Start
+//
+//	ctx := stepmark.New(ctx)                                        // enable tracing
+//	stepmark.Track(ctx, "order_42", map[string]any{"customer": "alice"})
+//	stepmark.RecordEntity(ctx, "order_42", "payment", "charged", meta)
+//	trace := stepmark.Collect(ctx)                                  // extract snapshot
+//
+// The typical lifecycle is: a middleware calls [New] at the start of a
+// request, handlers call [Record] / [RecordEntity] / [Track] throughout,
+// and the middleware calls [Collect] at the end to extract the result.
+//
+// See the stepmarkhttp subpackage for ready-made net/http middleware.
 package stepmark
 
 import "context"
